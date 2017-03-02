@@ -21,40 +21,27 @@ function findLevel(node) {
 	})
 }
 
-// find the node levels in the tree
+// global variable
 var levels = [];
-$.each(nodes, function(i, v) {
-	findLevel(v)
-});
+var nodes = null;
+var minYear = null;
+var maxYear = null;
 
-// find the min and max year in the documents
-var showTopicDocuments = typeof documents != "undefined"
-		&& typeof topicMap != "undefined"
-
-if (showTopicDocuments) {
-	var minYear = 1000000;
-	var maxYear = 0;
-	$.each(documents, function(i, d) {
-		if (d.year > maxYear)
-			maxYear = d.year;
-		if (d.year < minYear)
-			minYear = d.year;
-	})
-}
-
-function generateTopicDocumentTable(topic, max) {
-	var topicDocuments = topicMap[topic];
-
+function generateTopicDocumentTable(documents, max) {
 	var rows = [];
-	for (var i = 0; i < topicDocuments.length && i < max; i++) {
-		var d = topicDocuments[i];
-		var doc = documents[d[0]];
-		rows.push("<tr><td>" + doc.source + "</td><td>" + doc.year
-				+ "</td><td>" + doc.title + "</td><td>" + d[1].toFixed(2)
+	$.each(documents, function(i, doc) {
+		var paper = doc['paper'];
+			if(paper['url'])
+				rows.push("<tr><td>" + paper.series + "</td><td>" + paper.year
+				+ "</td><td><a href=\"" + paper.url + "\">" + paper.title + "</a></td><td>" + paper.author + "</td><td>" + doc['prob'].toFixed(2)
 				+ "</td></tr>");
-	}
+			else
+				rows.push("<tr><td>" + paper.series + "</td><td>" + paper.year
+				+ "</td><td>" + paper.title + "</td><td>" + paper.author + "</td><td>" + doc['prob'].toFixed(2)
+				+ "</td></tr>");
+	})
 
-	var table = $("<table class=\"tablesorter\"><thead><tr><th>Conf</th><th>Year</th><th>Title</th><th>Prob</th></tr></thead></table>")
+	var table = $("<table class=\"tablesorter\"><thead><tr><th>Series</th><th>Year</th><th>Title</th><th>Author</th><th>Prob</th></tr></thead></table>")
 			.append("<tbody/>").append(rows.join(""));
 
 	table.tablesorter({
@@ -70,16 +57,14 @@ function generateTopicDocumentTable(topic, max) {
 	return table;
 }
 
-function generateCountTable(topic) {
-	var topicDocuments = topicMap[topic];
+function generateCountTable(documents) {
 	var counts = {};
 	for (var year = minYear; year <= maxYear; year++) {
 		counts[year] = 0;
 	}
 
-	$.each(topicDocuments, function(i, d) {
-		var doc = documents[d[0]];
-		counts[doc.year] = counts[doc.year] + 1;
+	$.each(documents, function(i, doc) {
+		counts[doc.paper.year]++;
 	})
 
 	var headRow = $("<tr/>");
@@ -103,20 +88,24 @@ function constructTree(n) {
 			$("#topic-modal-title").html(
 				data.node.text + " (" + data.node.id + ")")
 
-			$("#topic-modal-body").html("")
-	
-			if (showTopicDocuments) {
-				var topicDocuments = topicMap[data.node.id]
-				max = 500
-	
-				$("#topic-modal-body").append("<h5>Number of documents by year:</h5>")
-				$("#topic-modal-body").append(generateCountTable(data.node.id));
-				$("#topic-modal-body").append("<h5>Document details (showing only the top " + max +"):</h5>")
-				$("#topic-modal-body").append(generateTopicDocumentTable(
-						data.node.id, max));
-			} else {
-				$("#topic-modal-body").append("<p>Document information is not available.</p>")
-			}
+			$("#topic-modal-body").html("Loading...");
+
+			$.ajax({   
+				url: 'search/'+data.node.id,   
+				type: "GET",   
+				dataType: "json",   
+				success: function(json) {
+					max = 500;
+					$("#topic-modal-body").html("");
+					$("#topic-modal-body").append("<h5>Number of documents by year:</h5>");
+					$("#topic-modal-body").append(generateCountTable(json.doc));
+					$("#topic-modal-body").append("<h5>Document details (showing only the top " + max +"):</h5>");
+					$("#topic-modal-body").append(generateTopicDocumentTable(json.doc, max));
+				},
+				error: function(jqXHR, textStatus, errorThrown) {
+					$("#topic-modal-body").append("<p>Document information is not available.</p>")
+				}
+			});
 
 			$("#topic-modal").modal()
 		}
@@ -164,7 +153,40 @@ function showAlert(message) {
 	$("#alert-modal").modal()
 }
 
-$(function() {
+function loadTree(next){
+	$.get({   
+		url: 'sample.nodes.js',
+		//dataType: "json",
+		success: function(json) {
+			//nodes = json['nodes'];
+			// find the node levels in the tree
+			$.each(nodes, function(i, v) {
+				findLevel(v);
+			});
+			next();
+		},
+		error: function(jqXHR, textStatus, errorThrown) {
+			$("#jstree").append("<p>"+errorThrown+"</p>");
+		}
+	});
+}
+
+function loadMeta(next){
+	$.get({   
+		url: 'sample.meta.json',  
+		dataType: "json",
+		success: function(json) {
+			minYear = json.minYear;
+			maxYear = json.maxYear;
+			next();
+		},
+		error: function(jqXHR, textStatus, errorThrown) {
+			$("#jstree").append("<p>"+errorThrown+"</p>");
+		}
+	});
+}
+
+function initialize(){
 	topmost = levels.length
 	bottommost = Math.max(1, levels.length - 1)
 
@@ -227,4 +249,10 @@ $(function() {
 //	$('#topic-modal').on('hidden.bs.modal', function (e) {
 //    	$("#jstree").focus()
 //    })
+}
+
+loadTree(function(){
+	loadMeta(function(){
+		initialize();
+	});
 });

@@ -53,7 +53,7 @@ object AssignTopics {
     val map = generateTopicToDocumentMap(topicData, 0.5)
 
     logger.info("Saving topic map")
-    writeTopicMap(map, outputName + ".topics.js")
+    writeTopicMap(map, outputName + ".topics.json")
   }
 
   def readModelAndComputeTopicData(modelFile: String, dataFile: String) = {
@@ -96,15 +96,15 @@ object AssignTopics {
   def writeTopicMap(map: Map[Variable, Seq[(Double, Int)]], outputFile: String) = {
     val writer = new PrintWriter(outputFile)
 
-    writer.println("var topicMap = {")
+    writer.println("[")
 
     writer.println(map.map { p =>
       val variable = p._1
-      val documents = p._2.map(p => f"[${p._2}%s, ${p._1}%.2f]").mkString(", ")
-      s"  ${variable.getName}: [${documents}]"
+      val documents = p._2.map(p => "{\"paper\":"+s"${p._2}"+",\"prob\":"+f"${p._1}%.2f}").mkString(",")
+      "{\"topic\":\""+variable.getName+"\",\"doc\":["+documents+"]}"
     }.mkString(",\n"))
 
-    writer.println("};")
+    writer.println("]")
 
     writer.close
   }
