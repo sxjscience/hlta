@@ -171,6 +171,11 @@ public class Variable implements Comparable {
 		return (_name.equals(variable._name) && _states
 				.equals(variable._states));
 	}
+	
+	@Override
+	public final int hashCode(){
+		return _name.hashCode();
+	}
 
 	/**
 	 * Returns the cardinality of this variable. The cardinality of a nominal

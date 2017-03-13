@@ -30,11 +30,11 @@ object AssignTopics {
     println("AssignTopics model_file data_file outputName")
     println
     println("E.g. AssignTopics model.bif data.arff output")
-    println("The output file will be output.topics.js and output.topics.arff")
+    println("The output file will be output.broad.json and output.broad.arff")
   }
 
   def run(modelFile: String, dataFile: String, outputName: String): Unit = {
-    val topicDataFile = outputName + ".topics.arff"
+    val topicDataFile = outputName + ".broad.arff"
     val (model, topicData) = if (Files.exists(Paths.get(topicDataFile))) {
       logger.info("Topic data file ({}) exists.  Skipped computing topic data.", topicDataFile)
       Reader.readLTMAndARFFData(modelFile, topicDataFile)
@@ -53,7 +53,7 @@ object AssignTopics {
     val map = generateTopicToDocumentMap(topicData, 0.5)
 
     logger.info("Saving topic map")
-    writeTopicMap(map, outputName + ".topics.json")
+    writeTopicMap(map, outputName + ".braod.json")
   }
 
   def readModelAndComputeTopicData(modelFile: String, dataFile: String) = {
@@ -100,7 +100,7 @@ object AssignTopics {
 
     writer.println(map.map { p =>
       val variable = p._1
-      val documents = p._2.map(p => "{\"paper\":"+s"${p._2}"+",\"prob\":"+f"${p._1}%.2f}").mkString(",")
+      val documents = p._2.map(p => "["+s"${p._2}"+","+f"${p._1}%.2f]").mkString(",")
       "{\"topic\":\""+variable.getName+"\",\"doc\":["+documents+"]}"
     }.mkString(",\n"))
 
