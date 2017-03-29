@@ -85,6 +85,7 @@ Where: `sample.txt` the name of the binary data file, `model` is the name of out
 
 The full parameter list is: `PEM training_data max_EM_steps num_EM_restarts EM_threshold UD_test_threshold model_name max_island max_top`.  The numerical parameters can be divided into two parts:
 
+
 * EM parameters:
   * `max_EM_steps`: Maximum number of EM steps (e.g. 50).
   * `num_EM_restarts`: Number of restarts in EM (e.g. 5).
