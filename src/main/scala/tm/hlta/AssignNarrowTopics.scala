@@ -21,7 +21,6 @@ object AssignNarrowTopics {
    *  Holds a topic variable and a list of document indices that belong to that
    *  topic.  The indices should be sorted in ascending order.
    */
-  type Column = (Variable, List[Int])
   val MAX_NUMBER_OF_WORDS = 7
 
   def main(args: Array[String]) {
@@ -37,31 +36,187 @@ object AssignNarrowTopics {
     println("FindNarrowlyDefinedTopics model_file data_file output")
     println
     println("e.g. FindNarrowlyDefinedTopics model.bif data.arff output")
+    println("The output file will be output.narrow.json and output.narrow.arff")
   }
   
   val logger = LoggerFactory.getLogger(AssignNarrowTopics.getClass)
 
   def run(modelFile: String, dataFile: String, outputName: String) = {
-    val (model, data, hlcmData) = readModelAndData(modelFile, dataFile)
+    val topicDataFile = outputName + ".narrow.arff";
+    //TODO: if file exists, use existing file    
+    
+    val (model, data) = Reader.readLTMAndARFFData(modelFile, dataFile)
+    val binaryData = data.binary
+    val hlcmData = data.toHLCMData
     val trees = HLTA.buildTopicTree(model)
 
+    // Computes the marginal probability of each latent variable.
     logger.info("Computing marginals of latent variables")
-    val marginals = computeMarginals(model)
+    val ctp = new CliqueTreePropagation(model)
+    ctp.propagate
+    val marginals = model.getInternalVars.map(v => (v, ctp.computeBelief(v))).toMap
 
-    logger.info("Processing trees")
-    implicit val c = Context(marginals, data.binary(), hlcmData)
+    logger.info("Compute topic assignhment by subtree")
+    implicit val c = Context(marginals, binaryData, hlcmData)
     val assignments = trees.map(processSubTree)
 
     logger.info("Saving topic assignments")
-    val name = dataFile.replaceAll(".data.arff", ".ndt")
-    val data1 = convertToData2(assignments, data.instances.map(_.weight))
-    data1.saveAsArff(name, outputName + ".ndt.arff", new DecimalFormat("#0.##"))
+    val assignmentsData = new ColumnwiseData(assignments.flatMap(_.toList), binaryData.instances.map(_.weight)).toData()
+    assignmentsData.saveAsArff(outputName + "-topics", topicDataFile, new DecimalFormat("#0.##"))
     
     logger.info("Generating topic map")
-    val map = generateTopicToDocumentMap(data1, 0.5)
+    val map = generateTopicToDocumentMap(assignmentsData, 0.5)
     
     logger.info("Saving topic map")
-    writeTopicMap(map, outputName + ".ndt.json")
+    writeTopicMap(map, outputName + ".narrow.json")
+  }
+  
+  /**
+   * Processes subtree of topic variables (latent variables) from level = 1..root
+   */
+  def processSubTree(tree: Tree[BeliefNode])(implicit c: Context): Tree[Column] = {
+    val children = tree.children.filterNot(_.value.isLeaf).par.map(processSubTree).toList
+
+    //process the root of this subtree
+    val lowerLevel = projectData(tree, c.data, children.map(_.value))
+    val variable = tree.value.getVariable
+    var lcm = extractLCM(tree, c.marginals(variable)) //build subtree
+    val baseData = new ColumnwiseData(lowerLevel, c.data.instances.map(_.weight)).toData()
+    //baseData.instances.map(_.values.mkString(",")).map(println)
+    lcm = estimate(variable, lcm, baseData.toHLCMData)
+    lcm = reorder(variable, lcm) //reorder status
+    val assignment = assign(variable, lcm, baseData)
+    println(assignment.getVariable.getName)
+    assignment.getValues.map(println)
+    Tree.node(assignment, children.toSeq)
+  }
+
+  def projectData(tree: Tree[BeliefNode], data: Data, childColumns: List[Column]): List[Column] = {
+    val childVariables = tree.children.map(_.value.getVariable)
+
+    // if children are observed variables, construct data from the original data
+    // otherwise construct data from next level assignment
+    if (tree.children.head.value.isLeaf)
+      childVariables.map(BinaryColumn.fromData(data, _))
+    else {
+      // reorder the next level columns
+      val m = childColumns.map { x => (x.getVariable, x) }.toMap[Variable, Column]
+      childVariables.flatMap(m.get(_))
+    }
+  }
+
+  /**
+   * Parameter re-learning
+   */
+  def estimate(root: Variable, model: LTM, data: DataSet): LTM = {
+    // the model is irregular is it has fewer than 3 leaf nodes
+    if (model.getLeafVars.size < 3) {
+      estimateByCounting(root, model, data)
+    } else {
+      runEM(model, data, 100, 64)
+    }
+  }
+
+  def toArrayList[A](as: A*): ArrayList[A] = new ArrayList(as)
+
+  def estimateByCounting(root: Variable, model: LTM, data: DataSet): LTM = {
+    val m = model.clone
+    val rootNode = m.getNode(root)
+    val leafNodes = rootNode.getChildren.map(_.asInstanceOf[BeliefNode])
+
+    val projected = data.project(new ArrayList(leafNodes.map(_.getVariable)))//count
+
+    def sumWeights[T <: { def getWeight(): Double }](ds: Seq[T]) =
+      ds.map(_.getWeight).sum
+
+    val (zeros, others) = projected.getData.partition(_.getStates.forall(_ == 0))//y01[0], y01[1]
+    val numberOfZeros = sumWeights(zeros)
+
+    rootNode.getCpt.getCells()(0) = numberOfZeros
+    rootNode.getCpt.getCells()(1) = sumWeights(others)
+    rootNode.getCpt.normalize()
+
+    leafNodes.foreach { l =>
+      val i = projected.getVariables.indexOf(l.getVariable)
+      val vs = new ArrayList(Seq(root, l.getVariable))
+      val cpt = Function.createFunction(vs)
+      cpt.setCell(vs, new ArrayList(Seq[Integer](0, 0)), numberOfZeros)//cell[0] before normalize
+      cpt.setCell(vs, new ArrayList(Seq[Integer](0, 1)), 0)//cell[2] before normalize
+
+      val (d0, d1) = others.partition(_.getStates()(i) == 0)
+      cpt.setCell(vs, new ArrayList(Seq[Integer](1, 0)), sumWeights(d0))//cell[1], [count(0,-)]/[totalcount-count(0,0)]
+      cpt.setCell(vs, new ArrayList(Seq[Integer](1, 1)), sumWeights(d1))//cell[3], [count(1,-)]/[totalcount-count(0,0)]
+      cpt.normalize(l.getVariable)
+      
+      l.setCpt(cpt)
+    }
+
+    m
+  }
+
+  def runEM(model: LTM, data: DataSet, maxSteps: Int, restarts: Int): LTM = {
+    val l = new ParallelEmLearner()
+    l.setLocalMaximaEscapeMethod("ChickeringHeckerman")
+    l.setMaxNumberOfSteps(maxSteps)
+    l.setNumberOfRestarts(restarts)
+    l.setReuseFlag(false)
+    l.setThreshold(0.01)
+
+    l.em(model, data).asInstanceOf[LTM]
+  }
+  
+  def extractLCM(tree: Tree[BeliefNode], marginal: Function): LTM = {
+    def convert(node: BeliefNode): (Variable, Option[Function]) =
+      (node.getVariable, Some(node.getCpt))
+
+    buildLCM((tree.value.getVariable, Some(marginal)),
+      tree.children.map(c => convert(c.value)))
+  }
+
+  def buildLCM(parent: (Variable, Option[Function]),
+    children: Seq[(Variable, Option[Function])]): LTM = {
+    val m = new LTM
+    val root = m.addNode(parent._1)
+    parent._2.foreach(root.setCpt)
+
+    children.foreach { c =>
+      val cn = m.addNode(c._1)
+      m.addEdge(cn, root)
+      c._2.map(_.clone).foreach(cn.setCpt)
+    }
+
+    m
+  }
+
+  def reorder(v: Variable, m: LTM): LTM = {
+    val model = m.clone
+
+    val node = model.getNode(v)
+    val children = node.getChildren.map(_.asInstanceOf[BeliefNode])
+    val sums = (0 until v.getCardinality).map { i =>
+      val s = children.map { c =>
+        HLTA.getValue(c.getCpt)(IndexedSeq(v, c.getVariable), Array(i, 1))
+      }.sum
+
+      (i, s)
+    }
+
+    val order = sums.sortBy(_._2).map(_._1)
+    node.reorderStates(order.toArray)
+
+    model
+  }
+
+  def assign(variable: Variable, model: LTM, data: Data): DoubleColumn = {
+    val ctp = new CliqueTreePropagation(model)
+    // grouping instances with same value to reduce computation
+    val list = data.instances.map { p =>
+        ctp.setEvidence(data.variables.toArray, p.values.map(_.toInt).toArray)
+        ctp.propagate
+        // return the state that has the highest probability
+        ctp.computeBelief(variable).getCells()(1)
+      }.toArray
+    new DoubleColumn(variable, list)
   }
   
   /**
@@ -96,223 +251,4 @@ object AssignNarrowTopics {
 
     writer.close
   }
-
-  def readModelAndData(modelFile: String, dataFile: String) = {
-    val (model, data) = Reader.readLTMAndARFFData(modelFile, dataFile)
-    val binaryData = data.binary
-    val hlcmData = data.toHLCMData
-    (model, binaryData, hlcmData)
-  }
-
-  /**
-   * Computes the marginal probability of each latent variable.
-   */
-  def computeMarginals(model: LTM): Map[Variable, Function] = {
-    val ctp = new CliqueTreePropagation(model)
-    ctp.propagate
-    model.getInternalVars.map(v => (v, ctp.computeBelief(v))).toMap
-  }
-
-  def projectData(tree: Tree[BeliefNode], data: Data, next: List[Column]): List[Column] = {
-    val childVariables = tree.children.map(_.value.getVariable)
-
-    // if children are observed variables, construct data from the original data
-    // otherwise construct data from next level assignment
-    if (tree.children.head.value.isLeaf)
-      childVariables.map(getColumn(data))
-    else {
-      // reorder the next level columns
-      val m = next.toMap[Variable, List[Int]]
-      childVariables.map(v => (v, m(v)))
-    }
-  }
-
-  def getColumn(data: Data)(variable: Variable): Column = {
-    val index = data.variables.indexOf(variable)
-    val instances = data.instances    
-    val list = (0 until instances.size)
-      .filter(d => instances(d).values(index) > 0).toList
-    (variable, list)
-  }
-
-  /**
-   * Processes subtree of topic variables (latent variables).
-   */
-  def processSubTree(tree: Tree[BeliefNode])(implicit c: Context): Tree[Column] = {
-    val children = tree.children.filterNot(_.value.isLeaf).par.map(processSubTree).toList
-
-    val assignment = processRootOfSubTree(
-      tree, projectData(tree, c.data, children.map(_.value)))
-    Tree.node(assignment, children.toSeq)
-  }
-
-  def processRootOfSubTree(
-    tree: Tree[BeliefNode], lowerLevel: List[Column])(implicit c: Context): Column = {
-    val variable = tree.value.getVariable
-    var lcm = extractLCM(tree, c.marginals(variable))
-    val baseData = convertToData(
-      lowerLevel, c.data.instances.map(_.weight))
-    lcm = estimate(variable, lcm, baseData.toHLCMData)
-    lcm = reorder(variable, lcm)
-    assign(variable, lcm, baseData)
-  }
-
-  def estimate(root: Variable, model: LTM, data: DataSet): LTM = {
-    // the model is irregular is it has fewer than 3 leaf nodes
-    if (model.getLeafVars.size < 3) {
-      estimateByCounting(root, model, data)
-    } else {
-      runEM(model, data, 100, 64)
-    }
-  }
-
-  def toArrayList[A](as: A*): ArrayList[A] = new ArrayList(as)
-
-  def estimateByCounting(root: Variable, model: LTM, data: DataSet): LTM = {
-    val m = model.clone
-    val rootNode = m.getNode(root)
-    val leafNodes = rootNode.getChildren.map(_.asInstanceOf[BeliefNode])
-
-    val projected = data.project(new ArrayList(leafNodes.map(_.getVariable)))
-
-    def sumWeights[T <: { def getWeight(): Double }](ds: Seq[T]) =
-      ds.map(_.getWeight).sum
-
-    val (zeros, others) = projected.getData.partition(_.getStates.forall(_ == 0))
-    val numberOfZeros = sumWeights(zeros)
-
-    rootNode.getCpt.getCells()(0) = numberOfZeros
-    rootNode.getCpt.getCells()(1) = sumWeights(others)
-    rootNode.getCpt.normalize()
-
-    leafNodes.foreach { l =>
-      val i = projected.getVariables.indexOf(l.getVariable)
-      val vs = new ArrayList(Seq(root, l.getVariable))
-      val cpt = Function.createFunction(vs)
-      cpt.setCell(vs, new ArrayList(Seq[Integer](0, 0)), numberOfZeros)
-      cpt.setCell(vs, new ArrayList(Seq[Integer](0, 1)), 0)
-
-      val (d0, d1) = others.partition(_.getStates()(i) == 0)
-      cpt.setCell(vs, new ArrayList(Seq[Integer](1, 0)), sumWeights(d0))
-      cpt.setCell(vs, new ArrayList(Seq[Integer](1, 1)), sumWeights(d1))
-      cpt.normalize(l.getVariable)
-      
-      l.setCpt(cpt)
-    }
-
-    m
-  }
-
-  def runEM(model: LTM, data: DataSet, maxSteps: Int, restarts: Int): LTM = {
-    val l = new ParallelEmLearner()
-    l.setLocalMaximaEscapeMethod("ChickeringHeckerman")
-    l.setMaxNumberOfSteps(maxSteps)
-    l.setNumberOfRestarts(restarts)
-    l.setReuseFlag(false)
-    l.setThreshold(0.01)
-
-    l.em(model, data).asInstanceOf[LTM]
-  }
-
-  def convertToData(columns: List[Column], weights: IndexedSeq[Double]): Data = {
-    @tailrec
-    def loop(i: Int, instances: Vector[Data.Instance],
-      columns: Array[List[Int]]): IndexedSeq[Data.Instance] = {
-      if (i >= weights.length) return instances
-
-      val heads = columns.map(_.headOption.getOrElse(weights.size))
-      val next = heads.min
-
-      def zeros = Array.fill(columns.length)(0.0)
-
-      if (i == next) {
-        // generate an instance with non-zero elements 
-        val minIndices = heads.zipWithIndex.filter(_._1 == next).map(_._2)
-        val values = zeros
-        minIndices.foreach(values(_) = 1)
-        val newColumns = minIndices.foldLeft(columns)((cs, i) => cs.updated(i, cs(i).tail))
-
-        loop(i + 1, instances :+ Data.Instance(values, weights(i)), newColumns)
-      } else {
-        // generate instances with all zero elements and skip to the next
-        // instance with non-zero element
-        val allZero = for (j <- (i until next))
-          yield Data.Instance(zeros, weights(j))
-        loop(next, instances ++ allZero, columns)
-      }
-    }
-
-    Data(columns.map(_._1).toIndexedSeq,
-      loop(0, Vector.empty, columns.map(_._2).toArray))
-  }
-
-  def buildLCM(parent: (Variable, Option[Function]),
-    children: Seq[(Variable, Option[Function])]): LTM = {
-    val m = new LTM
-    val root = m.addNode(parent._1)
-    parent._2.foreach(root.setCpt)
-
-    children.foreach { c =>
-      val cn = m.addNode(c._1)
-      m.addEdge(cn, root)
-      c._2.map(_.clone).foreach(cn.setCpt)
-    }
-
-    m
-  }
-
-  def extractLCM(tree: Tree[BeliefNode], marginal: Function): LTM = {
-    def convert(node: BeliefNode): (Variable, Option[Function]) =
-      (node.getVariable, Some(node.getCpt))
-
-    buildLCM((tree.value.getVariable, Some(marginal)),
-      tree.children.map(c => convert(c.value)))
-  }
-
-  def reorder(v: Variable, m: LTM): LTM = {
-    val model = m.clone
-
-    val node = model.getNode(v)
-    val children = node.getChildren.map(_.asInstanceOf[BeliefNode])
-    val sums = (0 until v.getCardinality).map { i =>
-      val s = children.map { c =>
-        HLTA.getValue(c.getCpt)(IndexedSeq(v, c.getVariable), Array(i, 1))
-      }.sum
-
-      (i, s)
-    }
-
-    val order = sums.sortBy(_._2).map(_._1)
-    node.reorderStates(order.toArray)
-
-    model
-  }
-
-  def assign(variable: Variable, model: LTM, data: Data): Column = {
-    val ctp = new CliqueTreePropagation(model)
-    // grouping instances with same value to reduce computation
-    val list = data.instances.toList.map { p =>
-        ctp.setEvidence(data.variables.toArray, p.values.map(_.toInt).toArray)
-        ctp.propagate
-        // return the state that has the highest probability
-        val s = ctp.computeBelief(variable).getCells
-        (s(1)*100).toInt
-      }
-
-    (variable, list)
-  }
-
-  def convertToData2(columns: List[Tree[Column]], weights: IndexedSeq[Double]): Data = {
-    val columnList = columns.flatMap(_.toList)
-    val instances = new Array[Data.Instance](columnList.get(0)._2.length)
-    for(i <- 0 to instances.length-1){
-      val doubles = new Array[Double](columnList.size)
-      for(j <- 0 to doubles.length-1){
-        doubles(j) = columnList.get(j)._2(i).toDouble/100
-      }
-      instances(i) = Data.Instance(doubles, weights(i))
-    }
-    Data(columnList.map(_._1).toIndexedSeq, instances.toIndexedSeq)
-  }
-
 }
