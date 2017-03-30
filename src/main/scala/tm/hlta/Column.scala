@@ -28,7 +28,7 @@ class BinaryColumn(variable: Variable, values: List[Int]) extends Column(variabl
   override def getValues = values
 }
 
-class DoubleColumn(variable: Variable, values: Array[Double]) extends Column(variable){
-  type T = Array[Double]
+class DoubleColumn(variable: Variable, values: Vector[Double]) extends Column(variable){
+  type T = Vector[Double]
   override def getValues = values 
 }

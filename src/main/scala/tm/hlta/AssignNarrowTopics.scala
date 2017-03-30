@@ -82,12 +82,9 @@ object AssignNarrowTopics {
     val variable = tree.value.getVariable
     var lcm = extractLCM(tree, c.marginals(variable)) //build subtree
     val baseData = new ColumnwiseData(lowerLevel, c.data.instances.map(_.weight)).toData()
-    //baseData.instances.map(_.values.mkString(",")).map(println)
     lcm = estimate(variable, lcm, baseData.toHLCMData)
     lcm = reorder(variable, lcm) //reorder status
     val assignment = assign(variable, lcm, baseData)
-    println(assignment.getVariable.getName)
-    assignment.getValues.map(println)
     Tree.node(assignment, children.toSeq)
   }
 
@@ -210,12 +207,12 @@ object AssignNarrowTopics {
   def assign(variable: Variable, model: LTM, data: Data): DoubleColumn = {
     val ctp = new CliqueTreePropagation(model)
     // grouping instances with same value to reduce computation
-    val list = data.instances.map { p =>
+    val list = data.instances.toVector.map { p =>
         ctp.setEvidence(data.variables.toArray, p.values.map(_.toInt).toArray)
         ctp.propagate
         // return the state that has the highest probability
         ctp.computeBelief(variable).getCells()(1)
-      }.toArray
+      }
     new DoubleColumn(variable, list)
   }
   

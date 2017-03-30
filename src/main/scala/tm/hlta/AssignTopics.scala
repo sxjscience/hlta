@@ -53,7 +53,7 @@ object AssignTopics {
     val map = generateTopicToDocumentMap(topicData, 0.5)
 
     logger.info("Saving topic map")
-    writeTopicMap(map, outputName + ".braod.json")
+    writeTopicMap(map, outputName + ".broad.json")
   }
 
   def readModelAndComputeTopicData(modelFile: String, dataFile: String) = {
